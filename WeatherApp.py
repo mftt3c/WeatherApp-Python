@@ -1,160 +1,237 @@
 import pgeocode
-import pandas as pd # Import pandas to use pd.isna() for checking NaN
+import pandas as pd
 import requests
 import json
-import sys # Import sys to handle command-line arguments
+import sys
 
-def zip_code_lookup(zip_code_to_query):
+def get_location_details(zip_code_to_query, is_gui_call=False):
+    """
+    Fetches location details (latitude, longitude, place name) for a given ZIP code.
 
-    # Initialize geocoder
-    # For the United States, use 'us'.
-    # For Great Britain, use 'gb'.
-    # For Canada, use 'ca'.
+    Args:
+        zip_code_to_query (str): The US ZIP code.
+        is_gui_call (bool): True if called by GUI, suppresses interactive prints.
+
+    Returns:
+        tuple: (latitude, longitude, place_name_formatted, error_message)
+               Returns (None, None, None, error_message) if an error occurs.
+    """
+    latitude, longitude, place_name_formatted, error_message = None, None, None, None
+    location_info = None # Initialize to ensure it's always defined
+
     try:
         nomi = pgeocode.Nominatim('us')
     except Exception as e:
-        print(f"Could not initialize geocoder: {e}")
-        exit()
+        error_message = f"Could not initialize geocoder: {e}"
+        if not is_gui_call:
+            print(error_message)
+        return latitude, longitude, place_name_formatted, error_message
 
-    print(f"\nQuerying information for ZIP code: {zip_code_to_query}...")
-    location_info = nomi.query_postal_code(zip_code_to_query)
+    if not is_gui_call:
+        print(f"\nQuerying information for ZIP code: {zip_code_to_query}...")
+    
+    try:
+        location_info = nomi.query_postal_code(zip_code_to_query)
+    except Exception as e: # Catch potential errors during the query itself
+        error_message = f"Error querying postal code {zip_code_to_query}: {e}"
+        if not is_gui_call:
+            print(error_message)
+        return latitude, longitude, place_name_formatted, error_message
 
-    # --- Check for Valid Location Data ---
-    # We consider data valid if key geographical fields like 'latitude' or 'place_name' are NOT NaN.
-    # pd.isna() is a reliable way to check for NaN in pandas objects.
-    if location_info.empty or pd.isna(location_info.latitude) or pd.isna(location_info.place_name):
-        print(f"\nNo valid geographic information found for ZIP code: {zip_code_to_query}")
-        print("This might be an invalid ZIP code or not available in the database for the US.")
+
+    if location_info is None or location_info.empty or pd.isna(location_info.latitude) or pd.isna(location_info.longitude):
+        error_message = f"No valid geographic information found for ZIP code: {zip_code_to_query}"
+        if not is_gui_call:
+            print(f"\n{error_message}")
+            print("This might be an invalid ZIP code or not available in the database for the US.")
     else:
-        print(f"\nLocation Information Found: \n{location_info.place_name if pd.notna(location_info.place_name) else 'N/A'} {location_info.state_name if pd.notna(location_info.state_name) else 'N/A'}, {location_info.postal_code}")
+        latitude = str(location_info.latitude) # Ensure string for JSON
+        longitude = str(location_info.longitude) # Ensure string for JSON
+        
+        place_name_str = location_info.place_name if pd.notna(location_info.place_name) else "N/A"
+        state_code_str = location_info.state_code if pd.notna(location_info.state_code) else "" # Use state_code for abbreviation
+        place_name_formatted = f"{place_name_str}, {state_code_str}".strip(", ") # Avoid trailing comma if state_code is empty
 
-    # Getting latitude and longitude for your weather lookup (Error handling included)
-    if (location_info.empty or pd.isna(location_info.latitude) or pd.isna(location_info.longitude)):
-            print("\nCannot proceed to weather lookup due to missing location data.")
-            exit()
-            return None, None
-    else:
-        lat = location_info.latitude
-        lon = location_info.longitude
-        print(f"\nProceeding with Latitude: {lat}, Longitude: {lon} for weather lookup.")
-        # Call your get_weather_forecast(lat, lon) function here
-        return lat, lon
+        if not is_gui_call:
+            print(f"\nLocation Information Found: {place_name_formatted}")
+            print(f"Proceeding with Latitude: {latitude}, Longitude: {longitude} for weather lookup.")
+            
+    return latitude, longitude, place_name_formatted, error_message
 
-def get_nws_forecast(latitude, longitude):
 
+def get_nws_forecast_data(latitude, longitude, is_gui_call=False):
     """
     Fetches the weather forecast from the NWS API for given coordinates.
 
     Args:
-        latitude (float): Latitude of the location.
-        longitude (float): Longitude of the location.
+        latitude (str): Latitude of the location.
+        longitude (str): Longitude of the location.
+        is_gui_call (bool): True if called by GUI, suppresses interactive prints.
 
     Returns:
-        list: A list of forecast periods, or None if an error occurs.
+        tuple: (list_of_forecast_period_dicts, error_message)
+               Returns (None, error_message) if an error occurs.
     """
+    forecast_periods_data = None
+    error_message = None
 
-    # --- Construct the User-Agent Header ---
-    # Replace with your actual app name and contact email or website
-    # This is REQUIRED by the NWS API.
-    user_agent = "(WeatherApp/1.0, mt.codes.mt@gmail.com)" 
-    headers = {
-        'User-Agent': user_agent
-    }
+    user_agent = "(WeatherAppPy/1.1, mt-codes-mt@gmail.com)" # Updated version/email
+    headers = {'User-Agent': user_agent}
 
- # --- Get the Gridpoint Metadata (to find the forecast URL) ---
-    points_url = f"https://api.weather.gov/points/{latitude:.4f},{longitude:.4f}"
-    # NWS API typically doesn't want more than 4 decimal places for lat/lon
+    points_url = f"https://api.weather.gov/points/{float(latitude):.4f},{float(longitude):.4f}"
+    
+    if not is_gui_call:
+        print(f"Fetching gridpoint data from: {points_url}")
+
     try:
-        response_points = requests.get(points_url, headers=headers, timeout=10) # 10-second timeout
-        response_points.raise_for_status()  # Raises an HTTPError for bad responses (4XX or 5XX)
+        response_points = requests.get(points_url, headers=headers, timeout=15)
+        response_points.raise_for_status()
         points_data = response_points.json()
-        
-        # Extract the forecast URL from the response
         forecast_url = points_data.get('properties', {}).get('forecast')
-        # You could also get 'forecastHourly' if you want an hourly breakdown
-        
+
         if not forecast_url:
-            print("Error: Could not find the forecast URL in the NWS points data.")
-            print("Raw points data received:")
-            print(json.dumps(points_data, indent=2)) # Print raw data for debugging
-            return None
+            error_message = "Error: Could not find the forecast URL in the NWS points data."
+            if not is_gui_call:
+                print(error_message)
+                print("Raw points data received:")
+                print(json.dumps(points_data, indent=2))
+            return None, error_message
 
     except requests.exceptions.HTTPError as http_err:
-        print(f"HTTP error occurred while fetching points data: {http_err} - Status: {response_points.status_code}")
-        if response_points.content:
-            print(f"Error details: {response_points.json()}") # NWS often returns JSON error details
-        return None
+        error_message = f"HTTP error fetching points: {http_err} (Status: {response_points.status_code if 'response_points' in locals() else 'Unknown'})"
+        if not is_gui_call: print(error_message)
+        return None, error_message
     except requests.exceptions.RequestException as req_err:
-        print(f"Request error occurred while fetching points data: {req_err}")
-        return None
+        error_message = f"Request error fetching points: {req_err}"
+        if not is_gui_call: print(error_message)
+        return None, error_message
     except json.JSONDecodeError:
-        print("Error: Could not decode JSON response from points endpoint.")
-        return None
+        error_message = "Error: Could not decode JSON from points endpoint."
+        if not is_gui_call: print(error_message)
+        return None, error_message
+    except Exception as e:
+        error_message = f"Unexpected error fetching points: {e}"
+        if not is_gui_call: print(error_message)
+        return None, error_message
 
 
-    # --- Step 3: Get the Actual Weather Forecast using the extracted URL ---
+    if not is_gui_call:
+        print(f"Fetching actual forecast from: {forecast_url}")
     try:
-        response_forecast = requests.get(forecast_url, headers=headers, timeout=10)
+        response_forecast = requests.get(forecast_url, headers=headers, timeout=15)
         response_forecast.raise_for_status()
         forecast_data = response_forecast.json()
         
-        # The forecast periods are usually in 'properties' -> 'periods'
-        return forecast_data.get('properties', {}).get('periods', [])
+        raw_periods = forecast_data.get('properties', {}).get('periods', [])
+        forecast_periods_data = []
+        for period in raw_periods:
+            # Prepare data to match VB.NET PythonForecastPeriod class
+            chance_val = period.get('probabilityOfPrecipitation', {}).get('value')
+            if chance_val is None: # NWS API returns null if no PoP
+                chance_of_precip_str = "0%"
+            else:
+                chance_of_precip_str = f"{chance_val}%"
+
+            forecast_periods_data.append({
+                "Name": period.get('name', 'N/A'),
+                "Temperature": period.get('temperature', 0), # Default to 0 if missing
+                "TemperatureUnit": period.get('temperatureUnit', 'F'),
+                "WindSpeed": period.get('windSpeed', 'N/A'),
+                "WindDirection": period.get('windDirection', 'N/A'),
+                "ShortForecast": period.get('shortForecast', 'N/A'),
+                "ChanceOfPrecipitation": chance_of_precip_str
+            })
         
     except requests.exceptions.HTTPError as http_err:
-        print(f"HTTP error occurred while fetching forecast: {http_err} - Status: {response_forecast.status_code}")
-        if response_forecast.content:
-            try:
-                print(f"Error details: {response_forecast.json()}")
-            except json.JSONDecodeError:
-                print(f"Error details (not JSON): {response_forecast.text}")
-        return None
+        error_message = f"HTTP error fetching forecast: {http_err} (Status: {response_forecast.status_code if 'response_forecast' in locals() else 'Unknown'})"
+        if not is_gui_call: print(error_message)
+        return None, error_message
     except requests.exceptions.RequestException as req_err:
-        print(f"Request error occurred while fetching forecast: {req_err}")
-        return None
+        error_message = f"Request error fetching forecast: {req_err}"
+        if not is_gui_call: print(error_message)
+        return None, error_message
     except json.JSONDecodeError:
-        print("Error: Could not decode JSON response from forecast endpoint.")
-        return None
+        error_message = "Error: Could not decode JSON from forecast endpoint."
+        if not is_gui_call: print(error_message)
+        return None, error_message
+    except Exception as e:
+        error_message = f"Unexpected error fetching forecast details: {e}"
+        if not is_gui_call: print(error_message)
+        return None, error_message
+        
+    return forecast_periods_data, error_message
+
 
 # --- Main Program ---
 if __name__ == "__main__":
-    # Check if a ZIP code was passed as a command-line argument
-    if len(sys.argv) > 1:
-        zip_code = sys.argv[1]
-        print(f"Using ZIP code: {zip_code}")
+    # Determine if called by GUI (if a ZIP code argument is provided)
+    # sys.argv[0] is the script name, sys.argv[1] would be the first argument
+    is_gui_call = len(sys.argv) > 1 
+    zip_code_arg = None
+
+    output_data_for_gui = {
+        "LocationName": None,
+        "Latitude": None,
+        "Longitude": None,
+        "ErrorMessage": None,
+        "ForecastPeriods": [] # Ensure it's an empty list, not null
+    }
+
+    if is_gui_call:
+        zip_code_arg = sys.argv[1]
     else:
-        zip_code = input("Please enter the US ZIP code: ")
+        zip_code_arg = input("Please enter the US ZIP code: ")
 
-    lat, lon = zip_code_lookup(zip_code)
-    if lat is None or lon is None:
-        print("Could not retrieve latitude and longitude. Exiting.")
-        exit()
+    # --- Step 1: Get Location Details ---
+    lat, lon, location_name, loc_error = get_location_details(zip_code_arg, is_gui_call)
 
-    get_nws_forecast(lat, lon)  
+    if loc_error:
+        output_data_for_gui["ErrorMessage"] = loc_error
+        if is_gui_call:
+            print(json.dumps(output_data_for_gui))
+        else:
+            # Interactive mode already printed the error in get_location_details
+            pass # Or print a summary error
+        sys.exit(1) # Exit with an error code if location fails
+
+    output_data_for_gui["LocationName"] = location_name
+    output_data_for_gui["Latitude"] = lat
+    output_data_for_gui["Longitude"] = lon
     
-    forecast_periods = get_nws_forecast(lat, lon)
-    if forecast_periods:
-        print("\n--- Weather Forecast ---")
-        # Let's print details for the first few periods
-        for period in forecast_periods[:4]: # Display first 3 periods for brevity
-            name = period.get('name', 'N/A')
-            temp = period.get('temperature', 'N/A')
-            temp_unit = period.get('temperatureUnit', '')
-            wind_speed = period.get('windSpeed', 'N/A')
-            wind_direction = period.get('windDirection', 'N/A')
-            short_forecast = period.get('shortForecast', 'N/A')
-            chance_of_precip = period.get('probabilityOfPrecipitation', {}).get('value', 'N/A')
-            # detailed_forecast = period.get('detailedForecast', 'N/A') # Can be very long
-            if chance_of_precip == None:
-                chance_of_precip = '0%'
-            else:
-                chance_of_precip = f"{chance_of_precip}%"
+    # --- Step 2: Get Weather Forecast ---
+    forecast_periods, weather_error = get_nws_forecast_data(lat, lon, is_gui_call)
 
-            print(f"\n>> {name}:")
-            print(f"   Temperature: {temp}°{temp_unit}")
-            print(f"   Chance of Precipitation: {chance_of_precip}.")
-            print(f"   Wind: {wind_speed} {wind_direction}")
-            print(f"   Forecast: {short_forecast}")
-            # print(f"   Details: {detailed_forecast}")
+    if weather_error:
+        # Combine with location error if it exists, or set it
+        combined_error = output_data_for_gui["ErrorMessage"] + f"; {weather_error}" if output_data_for_gui["ErrorMessage"] else weather_error
+        output_data_for_gui["ErrorMessage"] = combined_error
+        if is_gui_call:
+            print(json.dumps(output_data_for_gui))
+        else:
+             # Interactive mode already printed the error in get_nws_forecast_data
+            pass
+        sys.exit(1) # Exit with an error code if weather fails
+
+    if forecast_periods:
+        output_data_for_gui["ForecastPeriods"] = forecast_periods
+    
+    # --- Step 3: Output ---
+    if is_gui_call:
+        # Print the entire collected data as a single JSON string for VB.NET
+        print(json.dumps(output_data_for_gui))
     else:
-        print("\nCould not retrieve the weather forecast.")
+        # Interactive mode: Print formatted output to console
+        if output_data_for_gui["ErrorMessage"]:
+            print(f"\nError: {output_data_for_gui['ErrorMessage']}")
+        
+        if output_data_for_gui["ForecastPeriods"]:
+            print("\n--- Weather Forecast ---")
+            for period in output_data_for_gui["ForecastPeriods"][:4]: # Display first 4 periods
+                print(f"\n>> {period.get('Name', 'N/A')}:")
+                print(f"   Temperature: {period.get('Temperature', 'N/A')}°{period.get('TemperatureUnit', 'F')}")
+                print(f"   Chance of Precipitation: {period.get('ChanceOfPrecipitation', 'N/A')}")
+                print(f"   Wind: {period.get('WindSpeed', 'N/A')} {period.get('WindDirection', 'N/A')}")
+                print(f"   Forecast: {period.get('ShortForecast', 'N/A')}")
+        elif not output_data_for_gui["ErrorMessage"]: # Only print this if no other error was more specific
+            print("\nCould not retrieve the weather forecast details.")
+
